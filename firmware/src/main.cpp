@@ -15,8 +15,12 @@ constexpr float G0 = 9.80665f;
 constexpr uint32_t IMU_PERIOD_US = 5000;       // 200 Hz
 constexpr uint32_t TELEMETRY_PERIOD_MS = 50;   // 20 Hz
 
-constexpr int CAM_W = 320;
-constexpr int CAM_H = 240;
+constexpr int CAP_W = 320;
+constexpr int CAP_H = 240;
+// Track on a 2x downsampled image. This cuts the feature-tracking load
+// substantially and doubles the effective motion range of the search window.
+constexpr int CAM_W = 160;
+constexpr int CAM_H = 120;
 constexpr int MAX_FEATURES = 48;
 constexpr int GRID_X = 8;
 constexpr int GRID_Y = 6;
@@ -27,6 +31,7 @@ struct FlowState {
   float dx = 0.0f;
   float dy = 0.0f;
   float fps = 0.0f;
+  float proc_ms = 0.0f;
   uint16_t tracks = 0;
   uint64_t t_us = 0;
   bool valid = false;
@@ -135,6 +140,7 @@ int patchSad(const uint8_t* a, const uint8_t* b, int x0, int y0, int x1, int y1)
 }
 
 FlowState estimateFlow(const uint8_t* prev, const uint8_t* curr, uint64_t t_us, float fps) {
+  const uint64_t proc_start = esp_timer_get_time();
   Pt features[MAX_FEATURES];
   float dxs[MAX_FEATURES];
   float dys[MAX_FEATURES];
@@ -188,24 +194,42 @@ FlowState estimateFlow(const uint8_t* prev, const uint8_t* curr, uint64_t t_us, 
     f.dx = medianSmall(dxs, good);
     f.dy = medianSmall(dys, good);
   }
+  f.proc_ms = (float)(esp_timer_get_time() - proc_start) * 1e-3f;
   return f;
 }
 
 bool frameToGray(const camera_fb_t* fb, uint8_t* dst) {
-  if (!fb || fb->width != CAM_W || fb->height != CAM_H) return false;
+  if (!fb || fb->width != CAP_W || fb->height != CAP_H) return false;
 
-  if (fb->format == PIXFORMAT_GRAYSCALE && fb->len >= (size_t)CAM_W * CAM_H) {
-    memcpy(dst, fb->buf, (size_t)CAM_W * CAM_H);
+  // 2x point-sampled downsample: QVGA 320x240 -> 160x120.
+  // For VIO feature tracking this is intentionally simple and cheap.
+  if (fb->format == PIXFORMAT_GRAYSCALE &&
+      fb->len >= (size_t)CAP_W * CAP_H) {
+    for (int y = 0; y < CAM_H; ++y) {
+      const uint8_t* src = fb->buf + (2 * y) * CAP_W;
+      uint8_t* out = dst + y * CAM_W;
+      for (int x = 0; x < CAM_W; ++x) {
+        out[x] = src[2 * x];
+      }
+    }
     return true;
   }
 
-  if (fb->format == PIXFORMAT_RGB565 && fb->len >= (size_t)CAM_W * CAM_H * 2) {
-    for (int i = 0; i < CAM_W * CAM_H; ++i) {
-      const uint16_t p = (uint16_t)fb->buf[2*i] | ((uint16_t)fb->buf[2*i + 1] << 8);
-      const int r = ((p >> 11) & 0x1F) << 3;
-      const int g = ((p >> 5) & 0x3F) << 2;
-      const int b = (p & 0x1F) << 3;
-      dst[i] = (uint8_t)((77*r + 150*g + 29*b) >> 8);
+  if (fb->format == PIXFORMAT_RGB565 &&
+      fb->len >= (size_t)CAP_W * CAP_H * 2) {
+    for (int y = 0; y < CAM_H; ++y) {
+      const int sy = 2 * y;
+      uint8_t* out = dst + y * CAM_W;
+      for (int x = 0; x < CAM_W; ++x) {
+        const int sx = 2 * x;
+        const int i = sy * CAP_W + sx;
+        const uint16_t p = (uint16_t)fb->buf[2*i] |
+                           ((uint16_t)fb->buf[2*i + 1] << 8);
+        const int r = ((p >> 11) & 0x1F) << 3;
+        const int g = ((p >> 5) & 0x3F) << 2;
+        const int b = (p & 0x1F) << 3;
+        out[x] = (uint8_t)((77*r + 150*g + 29*b) >> 8);
+      }
     }
     return true;
   }
@@ -500,9 +524,10 @@ void printStatus() {
   p = g_pose;
   portEXIT_CRITICAL(&g_state_mux);
 
-  Serial.printf("STATUS,cam=%d,imu=%d,psram=%u,cam_rgb565=%d,cam_fps=%.1f,tracks=%u,flow=%.2f/%.2f,stationary=%d\n",
+  Serial.printf("STATUS,cam=%d,imu=%d,psram=%u,cam_rgb565=%d,cam_fps=%.1f,vision_ms=%.2f,track_res=%dx%d,tracks=%u,flow=%.2f/%.2f,stationary=%d\n",
                 (int)g_camera_ok, (int)g_imu_ok, (unsigned)ESP.getFreePsram(),
-                (int)g_camera_rgb565, f.fps, f.tracks, f.dx, f.dy, (int)p.stationary);
+                (int)g_camera_rgb565, f.fps, f.proc_ms, CAM_W, CAM_H,
+                f.tracks, f.dx, f.dy, (int)p.stationary);
 }
 
 void handleCommand(String s) {
@@ -554,7 +579,7 @@ void setup() {
   }
 
   Serial.println("READY");
-  Serial.println("POSE,t_us,px,py,pz,vx,vy,vz,qw,qx,qy,qz,roll_deg,pitch_deg,yaw_deg,flow_x,flow_y,tracks,flow_valid,cam_fps,stationary");
+  Serial.println("POSE,t_us,px,py,pz,vx,vy,vz,qw,qx,qy,qz,roll_deg,pitch_deg,yaw_deg,flow_x,flow_y,tracks,flow_valid,cam_fps,vision_ms,stationary");
   printStatus();
 }
 
@@ -585,13 +610,13 @@ void loop() {
     p = g_pose;
     portEXIT_CRITICAL(&g_state_mux);
 
-    Serial.printf("POSE,%llu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.7f,%.7f,%.7f,%.7f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%d,%.2f,%d\n",
+    Serial.printf("POSE,%llu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.7f,%.7f,%.7f,%.7f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%d,%.2f,%.2f,%d\n",
                   (unsigned long long)p.t_us,
                   p.p.x,p.p.y,p.p.z,
                   p.v.x,p.v.y,p.v.z,
                   p.q.w,p.q.x,p.q.y,p.q.z,
                   p.roll,p.pitch,p.yaw,
-                  f.dx,f.dy,f.tracks,(int)f.valid,f.fps,(int)p.stationary);
+                  f.dx,f.dy,f.tracks,(int)f.valid,f.fps,f.proc_ms,(int)p.stationary);
   }
 
   delay(2);
