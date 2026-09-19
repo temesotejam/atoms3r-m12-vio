@@ -1,0 +1,17 @@
+{
+  "name": "AtomS3R-M12 VIO",
+  "version": "0.1.0",
+  "home_assistant_domain": "",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "firmware/atoms3r-m12-vio.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
