@@ -33,6 +33,7 @@
     <button id="connect">シリアル接続</button>
     <button id="status">STATUS</button>
     <button id="reset">RESET_POSE</button>
+    <button id="copy">ログをコピー</button>
     <button id="clear">表示クリア</button>
     <pre id="log">未接続</pre>
   </div>
@@ -95,6 +96,31 @@ async function send(s) {
 document.querySelector('#connect').onclick = () => connectSerial().catch(e => append('\n' + e + '\n'));
 document.querySelector('#status').onclick = () => send('STATUS');
 document.querySelector('#reset').onclick = () => send('RESET_POSE');
+
+document.querySelector('#copy').onclick = async () => {
+  const button = document.querySelector('#copy');
+  const text = log.textContent || '';
+  try {
+    await navigator.clipboard.writeText(text);
+    const old = button.textContent;
+    button.textContent = 'コピーしました';
+    setTimeout(() => { button.textContent = old; }, 1200);
+  } catch (e) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+    const old = button.textContent;
+    button.textContent = 'コピーしました';
+    setTimeout(() => { button.textContent = old; }, 1200);
+  }
+};
+
 document.querySelector('#clear').onclick = () => { log.textContent=''; };
 </script>
 </body>
