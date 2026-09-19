@@ -23,7 +23,8 @@
   <div class="card">
     <h2>1. ファームウェアを書き込む</h2>
     <p>Chrome / Edge でAtomS3R-M12をUSB接続してから押してください。</p>
-    <esp-web-install-button manifest="./manifest.json"></esp-web-install-button>
+    <esp-web-install-button id="installer"></esp-web-install-button>
+    <div id="buildInfo" style="margin-top:8px;font-size:13px;opacity:.8"></div>
     <p class="warn">初回書き込み時はデバイス内の既存プログラムが置き換わります。</p>
   </div>
 
@@ -51,6 +52,12 @@
   </div>
 
 <script>
+const manifestUrl = './manifest.json?v=' + Date.now();
+document.querySelector('#installer').setAttribute('manifest', manifestUrl);
+fetch(manifestUrl, {cache:'no-store'}).then(r => r.json()).then(m => {
+  document.querySelector('#buildInfo').textContent = '公開ファーム: ' + (m.version || 'unknown');
+}).catch(() => {});
+
 let port, reader, writer;
 const log = document.querySelector('#log');
 
