@@ -217,7 +217,7 @@ void cameraPower(bool on) {
   digitalWrite(CAM_POWER_N, on ? LOW : HIGH);
 }
 
-camera_config_t cameraConfig(pixel_format_t fmt) {
+camera_config_t cameraConfig(pixformat_t fmt) {
   camera_config_t c{};
   c.ledc_channel = LEDC_CHANNEL_1;
   c.ledc_timer = LEDC_TIMER_1;
@@ -248,7 +248,7 @@ camera_config_t cameraConfig(pixel_format_t fmt) {
   return c;
 }
 
-bool tryCamera(pixel_format_t fmt) {
+bool tryCamera(pixformat_t fmt) {
   camera_config_t c = cameraConfig(fmt);
   const esp_err_t e = esp_camera_init(&c);
   if (e != ESP_OK) {
