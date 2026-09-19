@@ -61,7 +61,7 @@ jobs:
           fw_file = f"atoms3r-m12-vio-{sha}.bin"
           manifest_path = Path("site/manifest.json")
           text = manifest_path.read_text(encoding="utf-8")
-          text = text.replace("__VERSION__", f"v0.3-{sha}")
+          text = text.replace("__VERSION__", f"v0.4-{sha}")
           text = text.replace("__FIRMWARE_FILE__", fw_file)
           manifest_path.write_text(text, encoding="utf-8")
 
