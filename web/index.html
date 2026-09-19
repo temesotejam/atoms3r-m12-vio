@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AtomS3R-M12 VIO</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 850px; margin: 0 auto; padding: 24px; line-height: 1.6; }
+    h1 { margin-bottom: 6px; }
+    .card { border: 1px solid #8886; border-radius: 14px; padding: 18px; margin: 18px 0; }
+    button { padding: 10px 16px; margin: 4px; font-size: 15px; }
+    pre { min-height: 220px; max-height: 420px; overflow:auto; padding:12px; background:#000; color:#d7ffd7; border-radius:10px; font-size:12px; }
+    code { overflow-wrap:anywhere; }
+    .warn { font-weight: 650; }
+  </style>
+</head>
+<body>
+  <h1>AtomS3R-M12 VIO</h1>
+  <p>AtomS3R-M12 の Camera + BMI270 を使った軽量VIO試作です。</p>
+
+  <div class="card">
+    <h2>1. ファームウェアを書き込む</h2>
+    <p>Chrome / Edge でAtomS3R-M12をUSB接続してから押してください。</p>
+    <esp-web-install-button manifest="./manifest.json"></esp-web-install-button>
+    <p class="warn">初回書き込み時はデバイス内の既存プログラムが置き換わります。</p>
+  </div>
+
+  <div class="card">
+    <h2>2. シリアル確認</h2>
+    <p>書き込み後、デバイスを再起動してから接続します。115200 baudです。</p>
+    <button id="connect">シリアル接続</button>
+    <button id="status">STATUS</button>
+    <button id="reset">RESET_POSE</button>
+    <button id="clear">表示クリア</button>
+    <pre id="log">未接続</pre>
+  </div>
+
+  <div class="card">
+    <h2>最初の確認</h2>
+    <ol>
+      <li>起動後約2秒は静止させます。</li>
+      <li><code>[CAM] OK</code> と <code>[IMU] OK</code> を確認します。</li>
+      <li>POSE行のRoll/Pitch/Yawが回転に追従することを確認します。</li>
+      <li>模様のある壁や机を見ながら動かし、<code>tracks</code> が概ね10以上になるか確認します。</li>
+      <li>静止すると <code>stationary=1</code> に戻ることを確認します。</li>
+    </ol>
+    <p>v0.1の位置値はまだ完全なVisual Translation融合前で、短時間の慣性積分＋Visual stationary判定です。まずCamera/IMU/処理周期を実機で検証する段階です。</p>
+  </div>
+
+<script>
+let port, reader, writer;
+const log = document.querySelector('#log');
+
+function append(s) {
+  if (log.textContent === '未接続') log.textContent = '';
+  log.textContent += s;
+  if (log.textContent.length > 80000) log.textContent = log.textContent.slice(-50000);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function connectSerial() {
+  if (!('serial' in navigator)) {
+    alert('Web Serialに対応したChrome / Edgeを使用してください。');
+    return;
+  }
+  port = await navigator.serial.requestPort();
+  await port.open({ baudRate: 115200 });
+  const enc = new TextEncoderStream();
+  enc.readable.pipeTo(port.writable);
+  writer = enc.writable.getWriter();
+
+  const dec = new TextDecoderStream();
+  port.readable.pipeTo(dec.writable);
+  reader = dec.readable.getReader();
+  append('\n--- connected ---\n');
+
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      if (value) append(value);
+    }
+  } catch (e) {
+    append('\n[serial error] ' + e + '\n');
+  }
+}
+
+async function send(s) {
+  if (!writer) return;
+  await writer.write(s + '\n');
+}
+
+document.querySelector('#connect').onclick = () => connectSerial().catch(e => append('\n' + e + '\n'));
+document.querySelector('#status').onclick = () => send('STATUS');
+document.querySelector('#reset').onclick = () => send('RESET_POSE');
+document.querySelector('#clear').onclick = () => { log.textContent=''; };
+</script>
+</body>
+</html>
