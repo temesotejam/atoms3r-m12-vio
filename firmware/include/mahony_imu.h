@@ -10,9 +10,11 @@ struct Quatf {
 };
 
 struct Vec3f {
-  float x = 0.0f;
-  float y = 0.0f;
-  float z = 0.0f;
+  float x;
+  float y;
+  float z;
+  Vec3f() : x(0.0f), y(0.0f), z(0.0f) {}
+  Vec3f(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
 };
 
 class MahonyImu {
