@@ -30,7 +30,7 @@ jobs:
       - name: Build AtomS3R-M12 firmware
         run: pio run -d firmware
 
-      - name: Assemble web-flash image
+      - name: Assemble versioned web-flash image
         shell: bash
         run: |
           set -euxo pipefail
@@ -40,10 +40,47 @@ jobs:
           BUILD="firmware/.pio/build/atoms3r_m12"
           BOOT_APP0="$(find "$HOME/.platformio/packages/framework-arduinoespressif32" -name boot_app0.bin | head -n 1)"
           ESPTOOL="$HOME/.platformio/packages/tool-esptoolpy/esptool.py"
+          SHORT_SHA="${GITHUB_SHA:0:8}"
+          FW_FILE="atoms3r-m12-vio-${SHORT_SHA}.bin"
 
-          python "$ESPTOOL" --chip esp32s3 merge_bin             -o site/firmware/atoms3r-m12-vio.bin             0x0000 "$BUILD/bootloader.bin"             0x8000 "$BUILD/partitions.bin"             0xe000 "$BOOT_APP0"             0x10000 "$BUILD/firmware.bin"
+          python "$ESPTOOL" --chip esp32s3 merge_bin \
+            -o "site/firmware/$FW_FILE" \
+            0x0000 "$BUILD/bootloader.bin" \
+            0x8000 "$BUILD/partitions.bin" \
+            0xe000 "$BOOT_APP0" \
+            0x10000 "$BUILD/firmware.bin"
 
           cp "$BUILD/firmware.bin" site/firmware/app-only.bin
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          sha = os.environ["GITHUB_SHA"][:8]
+          fw_file = f"atoms3r-m12-vio-{sha}.bin"
+          manifest_path = Path("site/manifest.json")
+          text = manifest_path.read_text(encoding="utf-8")
+          text = text.replace("__VERSION__", f"v0.2-{sha}")
+          text = text.replace("__FIRMWARE_FILE__", fw_file)
+          manifest_path.write_text(text, encoding="utf-8")
+
+          manifest = json.loads(text)
+          actual_path = manifest["builds"][0]["parts"][0]["path"]
+          if actual_path != f"firmware/{fw_file}":
+              raise SystemExit(f"manifest path mismatch: {actual_path}")
+          if not Path("site", actual_path).is_file():
+              raise SystemExit(f"manifest target missing: {actual_path}")
+
+          print("DEPLOY_VERSION=" + manifest["version"])
+          print("DEPLOY_FIRMWARE=" + actual_path)
+          print("DEPLOY_SIZE=" + str(Path("site", actual_path).stat().st_size))
+          PY
+
+          echo "--- manifest.json ---"
+          cat site/manifest.json
+          echo
+          echo "--- firmware files ---"
           ls -lh site/firmware
 
       - name: Upload firmware build artifact
