@@ -12,7 +12,7 @@
 namespace {
 
 constexpr float G0 = 9.80665f;
-constexpr const char* FW_VERSION = "v0.3-qqvga";
+constexpr const char* FW_VERSION = "v0.4-pyramid";
 constexpr uint32_t IMU_PERIOD_US = 5000;       // 200 Hz
 constexpr uint32_t TELEMETRY_PERIOD_MS = 50;   // 20 Hz
 
@@ -27,14 +27,19 @@ constexpr int MAX_FEATURES = 48;
 constexpr int GRID_X = 8;
 constexpr int GRID_Y = 6;
 constexpr int PATCH_R = 2;
-constexpr int SEARCH_R = 10;
+constexpr int PYR_W = CAM_W / 2;
+constexpr int PYR_H = CAM_H / 2;
+constexpr int COARSE_SEARCH_R = 8;   // +/-16 px equivalent at full resolution
+constexpr int REFINE_SEARCH_R = 3;   // full-resolution refinement around coarse result
 
 struct FlowState {
   float dx = 0.0f;
   float dy = 0.0f;
   float fps = 0.0f;
   float proc_ms = 0.0f;
+  uint16_t detected = 0;
   uint16_t tracks = 0;
+  uint16_t saturated = 0;
   uint64_t t_us = 0;
   bool valid = false;
 };
@@ -77,6 +82,8 @@ bool g_csv = true;
 
 uint8_t* g_gray_a = nullptr;
 uint8_t* g_gray_b = nullptr;
+uint8_t* g_half_a = nullptr;
+uint8_t* g_half_b = nullptr;
 
 inline uint8_t grayAt(const uint8_t* img, int x, int y) {
   return img[y * CAM_W + x];
@@ -131,17 +138,35 @@ int detectFeatures(const uint8_t* img, Pt* out) {
   return count;
 }
 
-int patchSad(const uint8_t* a, const uint8_t* b, int x0, int y0, int x1, int y1) {
+int patchSadGeneric(const uint8_t* a, const uint8_t* b, int w,
+                    int x0, int y0, int x1, int y1) {
   int sad = 0;
   for (int py = -PATCH_R; py <= PATCH_R; ++py) {
     for (int px = -PATCH_R; px <= PATCH_R; ++px) {
-      sad += abs((int)grayAt(a, x0 + px, y0 + py) - (int)grayAt(b, x1 + px, y1 + py));
+      const int va = a[(y0 + py) * w + (x0 + px)];
+      const int vb = b[(y1 + py) * w + (x1 + px)];
+      sad += abs(va - vb);
     }
   }
   return sad;
 }
 
-FlowState estimateFlow(const uint8_t* prev, const uint8_t* curr, uint64_t t_us, float fps) {
+void downsampleHalf(const uint8_t* src, uint8_t* dst) {
+  for (int y = 0; y < PYR_H; ++y) {
+    const int sy = 2 * y;
+    for (int x = 0; x < PYR_W; ++x) {
+      const int sx = 2 * x;
+      const int i0 = sy * CAM_W + sx;
+      const int sum = src[i0] + src[i0 + 1]
+                    + src[i0 + CAM_W] + src[i0 + CAM_W + 1];
+      dst[y * PYR_W + x] = (uint8_t)((sum + 2) >> 2);
+    }
+  }
+}
+
+FlowState estimateFlow(const uint8_t* prev, const uint8_t* curr,
+                       const uint8_t* prev_half, const uint8_t* curr_half,
+                       uint64_t t_us, float fps) {
   const uint64_t proc_start = esp_timer_get_time();
   Pt features[MAX_FEATURES];
   float dxs[MAX_FEATURES];
@@ -149,40 +174,82 @@ FlowState estimateFlow(const uint8_t* prev, const uint8_t* curr, uint64_t t_us, 
 
   const int n = detectFeatures(prev, features);
   int good = 0;
+  int saturated = 0;
+
+  constexpr int PATCH_PIXELS = (PATCH_R * 2 + 1) * (PATCH_R * 2 + 1);
 
   for (int i = 0; i < n; ++i) {
     const int x = features[i].x;
     const int y = features[i].y;
+    const int hx = x >> 1;
+    const int hy = y >> 1;
+
+    if (hx < PATCH_R + 1 || hx >= PYR_W - PATCH_R - 1 ||
+        hy < PATCH_R + 1 || hy >= PYR_H - PATCH_R - 1) {
+      continue;
+    }
+
+    int coarse_best = 1 << 30;
+    int coarse_dx = 0, coarse_dy = 0;
+
+    for (int dy = -COARSE_SEARCH_R; dy <= COARSE_SEARCH_R; ++dy) {
+      for (int dx = -COARSE_SEARCH_R; dx <= COARSE_SEARCH_R; ++dx) {
+        const int xx = hx + dx;
+        const int yy = hy + dy;
+        if (xx < PATCH_R + 1 || xx >= PYR_W - PATCH_R - 1 ||
+            yy < PATCH_R + 1 || yy >= PYR_H - PATCH_R - 1) {
+          continue;
+        }
+        const int sad = patchSadGeneric(prev_half, curr_half, PYR_W, hx, hy, xx, yy);
+        if (sad < coarse_best) {
+          coarse_best = sad;
+          coarse_dx = dx;
+          coarse_dy = dy;
+        }
+      }
+    }
+
+    if (coarse_best == (1 << 30)) continue;
+    if (abs(coarse_dx) == COARSE_SEARCH_R || abs(coarse_dy) == COARSE_SEARCH_R) {
+      ++saturated;
+    }
+
+    const int pred_x = x + 2 * coarse_dx;
+    const int pred_y = y + 2 * coarse_dy;
+
     int best_sad = 1 << 30;
     int second_sad = 1 << 30;
-    int best_dx = 0, best_dy = 0;
+    int best_x = pred_x, best_y = pred_y;
 
-    for (int dy = -SEARCH_R; dy <= SEARCH_R; ++dy) {
-      for (int dx = -SEARCH_R; dx <= SEARCH_R; ++dx) {
-        const int xx = x + dx;
-        const int yy = y + dy;
+    for (int dy = -REFINE_SEARCH_R; dy <= REFINE_SEARCH_R; ++dy) {
+      for (int dx = -REFINE_SEARCH_R; dx <= REFINE_SEARCH_R; ++dx) {
+        const int xx = pred_x + dx;
+        const int yy = pred_y + dy;
         if (xx < PATCH_R + 1 || xx >= CAM_W - PATCH_R - 1 ||
             yy < PATCH_R + 1 || yy >= CAM_H - PATCH_R - 1) {
           continue;
         }
-        const int sad = patchSad(prev, curr, x, y, xx, yy);
+        const int sad = patchSadGeneric(prev, curr, CAM_W, x, y, xx, yy);
         if (sad < best_sad) {
           second_sad = best_sad;
           best_sad = sad;
-          best_dx = dx;
-          best_dy = dy;
+          best_x = xx;
+          best_y = yy;
         } else if (sad < second_sad) {
           second_sad = sad;
         }
       }
     }
 
-    constexpr int PATCH_PIXELS = (PATCH_R * 2 + 1) * (PATCH_R * 2 + 1);
+    if (best_sad == (1 << 30)) continue;
+
     const float mean_sad = (float)best_sad / PATCH_PIXELS;
-    const bool unique = second_sad > best_sad + 30;
-    if (mean_sad < 24.0f && unique) {
-      dxs[good] = (float)best_dx;
-      dys[good] = (float)best_dy;
+    // Slightly relaxed from v0.3. The later VIO stage will use robust
+    // geometric outlier rejection; at this stage retaining tracks is more useful.
+    const bool unique = second_sad > best_sad + 20;
+    if (mean_sad < 30.0f && unique) {
+      dxs[good] = (float)(best_x - x);
+      dys[good] = (float)(best_y - y);
       ++good;
     }
   }
@@ -190,7 +257,9 @@ FlowState estimateFlow(const uint8_t* prev, const uint8_t* curr, uint64_t t_us, 
   FlowState f;
   f.t_us = t_us;
   f.fps = fps;
+  f.detected = n;
   f.tracks = good;
+  f.saturated = saturated;
   f.valid = good >= 6;
   if (f.valid) {
     f.dx = medianSmall(dxs, good);
@@ -460,13 +529,15 @@ void imuTask(void*) {
 }
 
 void cameraTask(void*) {
-  if (!g_camera_ok || !g_gray_a || !g_gray_b) {
+  if (!g_camera_ok || !g_gray_a || !g_gray_b || !g_half_a || !g_half_b) {
     vTaskDelete(nullptr);
     return;
   }
 
   uint8_t* prev = g_gray_a;
   uint8_t* curr = g_gray_b;
+  uint8_t* prev_half = g_half_a;
+  uint8_t* curr_half = g_half_b;
   bool have_prev = false;
   uint64_t last_t = 0;
 
@@ -486,9 +557,11 @@ void cameraTask(void*) {
       continue;
     }
 
+    downsampleHalf(curr, curr_half);
+
     if (have_prev) {
       const float fps = (last_t > 0 && now > last_t) ? 1e6f / (float)(now - last_t) : 0.0f;
-      FlowState f = estimateFlow(prev, curr, now, fps);
+      FlowState f = estimateFlow(prev, curr, prev_half, curr_half, now, fps);
       portENTER_CRITICAL(&g_state_mux);
       g_flow = f;
       portEXIT_CRITICAL(&g_state_mux);
@@ -497,6 +570,9 @@ void cameraTask(void*) {
     uint8_t* tmp = prev;
     prev = curr;
     curr = tmp;
+    uint8_t* htmp = prev_half;
+    prev_half = curr_half;
+    curr_half = htmp;
     have_prev = true;
     last_t = now;
 
@@ -512,10 +588,10 @@ void printStatus() {
   p = g_pose;
   portEXIT_CRITICAL(&g_state_mux);
 
-  Serial.printf("STATUS,cam=%d,imu=%d,psram=%u,cam_rgb565=%d,cam_fps=%.1f,vision_ms=%.2f,track_res=%dx%d,tracks=%u,flow=%.2f/%.2f,stationary=%d\n",
+  Serial.printf("STATUS,cam=%d,imu=%d,psram=%u,cam_rgb565=%d,cam_fps=%.1f,vision_ms=%.2f,track_res=%dx%d,detected=%u,tracks=%u,sat=%u,flow=%.2f/%.2f,stationary=%d\n",
                 (int)g_camera_ok, (int)g_imu_ok, (unsigned)ESP.getFreePsram(),
                 (int)g_camera_rgb565, f.fps, f.proc_ms, CAM_W, CAM_H,
-                f.tracks, f.dx, f.dy, (int)p.stationary);
+                f.detected, f.tracks, f.saturated, f.dx, f.dy, (int)p.stationary);
 }
 
 void handleCommand(String s) {
@@ -554,8 +630,10 @@ void setup() {
 
   g_gray_a = (uint8_t*)ps_malloc((size_t)CAM_W * CAM_H);
   g_gray_b = (uint8_t*)ps_malloc((size_t)CAM_W * CAM_H);
-  if (!g_gray_a || !g_gray_b) {
-    Serial.println("[CAM] grayscale buffers allocation failed");
+  g_half_a = (uint8_t*)ps_malloc((size_t)PYR_W * PYR_H);
+  g_half_b = (uint8_t*)ps_malloc((size_t)PYR_W * PYR_H);
+  if (!g_gray_a || !g_gray_b || !g_half_a || !g_half_b) {
+    Serial.println("[CAM] tracking buffers allocation failed");
     g_camera_ok = false;
   }
 
@@ -567,7 +645,7 @@ void setup() {
   }
 
   Serial.println("READY");
-  Serial.println("POSE,t_us,px,py,pz,vx,vy,vz,qw,qx,qy,qz,roll_deg,pitch_deg,yaw_deg,flow_x,flow_y,tracks,flow_valid,cam_fps,vision_ms,stationary");
+  Serial.println("POSE,t_us,px,py,pz,vx,vy,vz,qw,qx,qy,qz,roll_deg,pitch_deg,yaw_deg,flow_x,flow_y,detected,tracks,sat,flow_valid,cam_fps,vision_ms,stationary");
   printStatus();
 }
 
@@ -598,13 +676,13 @@ void loop() {
     p = g_pose;
     portEXIT_CRITICAL(&g_state_mux);
 
-    Serial.printf("POSE,%llu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.7f,%.7f,%.7f,%.7f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%d,%.2f,%.2f,%d\n",
+    Serial.printf("POSE,%llu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.7f,%.7f,%.7f,%.7f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%u,%d,%.2f,%.2f,%d\n",
                   (unsigned long long)p.t_us,
                   p.p.x,p.p.y,p.p.z,
                   p.v.x,p.v.y,p.v.z,
                   p.q.w,p.q.x,p.q.y,p.q.z,
                   p.roll,p.pitch,p.yaw,
-                  f.dx,f.dy,f.tracks,(int)f.valid,f.fps,f.proc_ms,(int)p.stationary);
+                  f.dx,f.dy,f.detected,f.tracks,f.saturated,(int)f.valid,f.fps,f.proc_ms,(int)p.stationary);
   }
 
   delay(2);
