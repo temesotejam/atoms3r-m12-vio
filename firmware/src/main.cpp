@@ -12,14 +12,15 @@
 namespace {
 
 constexpr float G0 = 9.80665f;
-constexpr const char* FW_VERSION = "v0.2-downsample";
+constexpr const char* FW_VERSION = "v0.3-qqvga";
 constexpr uint32_t IMU_PERIOD_US = 5000;       // 200 Hz
 constexpr uint32_t TELEMETRY_PERIOD_MS = 50;   // 20 Hz
 
-constexpr int CAP_W = 320;
-constexpr int CAP_H = 240;
-// Track on a 2x downsampled image. This cuts the feature-tracking load
-// substantially and doubles the effective motion range of the search window.
+// Capture and track directly at QQVGA. The OV3660 driver uses a faster
+// non-JPEG PLL regime below QVGA, raising sensor-side frame rate from the
+// ~10 fps QVGA regime toward ~17.8 fps.
+constexpr int CAP_W = 160;
+constexpr int CAP_H = 120;
 constexpr int CAM_W = 160;
 constexpr int CAM_H = 120;
 constexpr int MAX_FEATURES = 48;
@@ -202,35 +203,21 @@ FlowState estimateFlow(const uint8_t* prev, const uint8_t* curr, uint64_t t_us, 
 bool frameToGray(const camera_fb_t* fb, uint8_t* dst) {
   if (!fb || fb->width != CAP_W || fb->height != CAP_H) return false;
 
-  // 2x point-sampled downsample: QVGA 320x240 -> 160x120.
-  // For VIO feature tracking this is intentionally simple and cheap.
   if (fb->format == PIXFORMAT_GRAYSCALE &&
       fb->len >= (size_t)CAP_W * CAP_H) {
-    for (int y = 0; y < CAM_H; ++y) {
-      const uint8_t* src = fb->buf + (2 * y) * CAP_W;
-      uint8_t* out = dst + y * CAM_W;
-      for (int x = 0; x < CAM_W; ++x) {
-        out[x] = src[2 * x];
-      }
-    }
+    memcpy(dst, fb->buf, (size_t)CAP_W * CAP_H);
     return true;
   }
 
   if (fb->format == PIXFORMAT_RGB565 &&
       fb->len >= (size_t)CAP_W * CAP_H * 2) {
-    for (int y = 0; y < CAM_H; ++y) {
-      const int sy = 2 * y;
-      uint8_t* out = dst + y * CAM_W;
-      for (int x = 0; x < CAM_W; ++x) {
-        const int sx = 2 * x;
-        const int i = sy * CAP_W + sx;
-        const uint16_t p = (uint16_t)fb->buf[2*i] |
-                           ((uint16_t)fb->buf[2*i + 1] << 8);
-        const int r = ((p >> 11) & 0x1F) << 3;
-        const int g = ((p >> 5) & 0x3F) << 2;
-        const int b = (p & 0x1F) << 3;
-        out[x] = (uint8_t)((77*r + 150*g + 29*b) >> 8);
-      }
+    for (int i = 0; i < CAP_W * CAP_H; ++i) {
+      const uint16_t p = (uint16_t)fb->buf[2*i] |
+                         ((uint16_t)fb->buf[2*i + 1] << 8);
+      const int r = ((p >> 11) & 0x1F) << 3;
+      const int g = ((p >> 5) & 0x3F) << 2;
+      const int b = (p & 0x1F) << 3;
+      dst[i] = (uint8_t)((77*r + 150*g + 29*b) >> 8);
     }
     return true;
   }
@@ -265,7 +252,7 @@ camera_config_t cameraConfig(pixformat_t fmt) {
   c.sccb_i2c_port = 1;
   c.xclk_freq_hz = 20000000;
   c.pixel_format = fmt;
-  c.frame_size = FRAMESIZE_QVGA;
+  c.frame_size = FRAMESIZE_QQVGA;
   c.jpeg_quality = 12;
   c.fb_count = 2;
   c.fb_location = CAMERA_FB_IN_PSRAM;
@@ -282,7 +269,7 @@ bool tryCamera(pixformat_t fmt) {
     return false;
   }
   sensor_t* s = esp_camera_sensor_get();
-  if (s) s->set_framesize(s, FRAMESIZE_QVGA);
+  if (s) s->set_framesize(s, FRAMESIZE_QQVGA);
   g_camera_rgb565 = (fmt == PIXFORMAT_RGB565);
   return true;
 }
