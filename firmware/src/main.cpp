@@ -12,6 +12,7 @@
 namespace {
 
 constexpr float G0 = 9.80665f;
+constexpr const char* FW_VERSION = "v0.2-downsample";
 constexpr uint32_t IMU_PERIOD_US = 5000;       // 200 Hz
 constexpr uint32_t TELEMETRY_PERIOD_MS = 50;   // 20 Hz
 
@@ -552,7 +553,7 @@ void setup() {
   Serial.begin(115200);
   delay(600);
   Serial.println();
-  Serial.println("AtomS3R-M12 VIO foundation v0.1");
+  Serial.printf("AtomS3R-M12 VIO %s\n", FW_VERSION);
 
   g_camera_ok = initCamera();
   Serial.printf("[CAM] %s\n", g_camera_ok ? "OK" : "FAILED");
