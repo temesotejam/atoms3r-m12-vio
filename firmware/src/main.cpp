@@ -21,7 +21,7 @@ constexpr int MAX_FEATURES = 48;
 constexpr int GRID_X = 8;
 constexpr int GRID_Y = 6;
 constexpr int PATCH_R = 2;
-constexpr int SEARCH_R = 6;
+constexpr int SEARCH_R = 10;
 
 struct FlowState {
   float dx = 0.0f;
@@ -396,8 +396,11 @@ void imuTask(void*) {
     portEXIT_CRITICAL(&g_state_mux);
 
     const float flow_mag = sqrtf(flow.dx*flow.dx + flow.dy*flow.dy);
-    const bool visual_still = !flow.valid || (flow.tracks >= 8 && flow_mag < 0.45f);
+    const bool flow_fresh = flow.valid && now >= flow.t_us && (now - flow.t_us) < 250000ULL;
+    const bool visual_still = flow_fresh && flow_mag < 0.45f;
     const bool imu_still = gyro_norm < 0.060f && fabsf(accel_norm - 1.0f) < 0.045f;
+    // ZUPT is asserted only when BOTH IMU and a recent valid visual flow agree on stillness.
+    // This avoids falsely declaring stillness when visual tracking is lost during motion.
     const bool stationary = imu_still && visual_still;
 
     Vec3f body_a_ms2{ax * G0, ay * G0, az * G0};
@@ -551,7 +554,7 @@ void setup() {
   }
 
   Serial.println("READY");
-  Serial.println("POSE,t_us,px,py,pz,vx,vy,vz,qw,qx,qy,qz,roll_deg,pitch_deg,yaw_deg,flow_x,flow_y,tracks,stationary");
+  Serial.println("POSE,t_us,px,py,pz,vx,vy,vz,qw,qx,qy,qz,roll_deg,pitch_deg,yaw_deg,flow_x,flow_y,tracks,flow_valid,cam_fps,stationary");
   printStatus();
 }
 
@@ -582,13 +585,13 @@ void loop() {
     p = g_pose;
     portEXIT_CRITICAL(&g_state_mux);
 
-    Serial.printf("POSE,%llu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.7f,%.7f,%.7f,%.7f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%d\n",
+    Serial.printf("POSE,%llu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.7f,%.7f,%.7f,%.7f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%d,%.2f,%d\n",
                   (unsigned long long)p.t_us,
                   p.p.x,p.p.y,p.p.z,
                   p.v.x,p.v.y,p.v.z,
                   p.q.w,p.q.x,p.q.y,p.q.z,
                   p.roll,p.pitch,p.yaw,
-                  f.dx,f.dy,f.tracks,(int)p.stationary);
+                  f.dx,f.dy,f.tracks,(int)f.valid,f.fps,(int)p.stationary);
   }
 
   delay(2);
